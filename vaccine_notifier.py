@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 import requests
 import logging
 import urllib3
+from math import sin, cos, sqrt, atan2, radians
+from playsound import playsound
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -19,11 +21,18 @@ tomorrow = (datetime.now() + timedelta(1)).strftime('%d-%m-%Y')
 
 port = 465
 smtp_server = "smtp.gmail.com"
-# make sure less secure access is ON for this account
+
+# make sure less secure access is ON for sender account
 # https://myaccount.google.com/lesssecureapps
-sender_email = "xyz@gmail.com"
-password = "xyz"
-notification_targets = ["pqr@gmail.com"]
+sender_email = ""    #set your email address here
+
+
+password = "" #set  our password here
+notification_targets = []  # add the users email address who should be notified when the vaccine is available
+
+user_lat = 0
+user_long = 0
+radius = 0
 
 
 def clear_screen():
@@ -33,6 +42,26 @@ def clear_screen():
         os.system('cls')
     else:
         os.system('clear')
+
+
+def audio_alert():
+    from os import path
+    filename = "voice_alert.mp3"
+
+    if not path.exists(filename):
+        from gtts import gTTS
+        mytext = 'Alert! vaccines available'
+        language = 'en'
+        myobj = gTTS(text=mytext, lang=language, slow=False)
+        myobj.save(filename)
+
+    while True:
+        try:
+            print("press ctrl+c to stop the notification")
+            playsound(filename)
+            time.sleep(0.3)
+        except KeyboardInterrupt as e:
+            return
 
 
 def _send_email(receiver_email, message):
@@ -47,6 +76,23 @@ def _send_email(receiver_email, message):
     except Exception as e:
         pass
     return False
+
+
+def geographical_distance(center):
+    R = 6373.0
+
+    lat1 = radians(user_lat)
+    lon1 = radians(user_long)
+    lat2 = radians(center['lat'])
+    lon2 = radians(center['long'])
+
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+
+    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+
+    return R * c
 
 
 def _is_response_successful(response):
@@ -74,81 +120,111 @@ def _is_response_successful(response):
 
 
 def generate_otp(number):
-    url = base_url + "/v2/auth/public/generateOTP"
-    payload = {"mobile": number}
+    try:
+        url = base_url + "/v2/auth/public/generateOTP"
+        payload = {"mobile": number}
 
-    response = requests.post(url, json=payload, verify=False)
+        response = requests.post(url, json=payload, verify=False)
 
-    if not _is_response_successful(response):
-        logger.error("Could not generate OTP")
-        return False
+        if not _is_response_successful(response):
+            logger.error("Could not generate OTP")
+            return False
 
-    data = response.json()
-    auth["txnId"] = data["txnId"]
-    return True
+        data = response.json()
+        auth["txnId"] = data["txnId"]
+        return True
+    except requests.exceptions.ConnectionError as e:
+        logger.error("Internet connection is not available")
 
 
 def confirm_otp(otp):
-    url = base_url + "/v2/auth/public/confirmOTP"
-    import hashlib
-    otp_sha256 = hashlib.sha256(otp.encode())
-    payload = {
-        "otp": otp_sha256.hexdigest(),
-        "txnId": auth["txnId"]
-    }
+    try:
+        url = base_url + "/v2/auth/public/confirmOTP"
+        import hashlib
+        otp_sha256 = hashlib.sha256(otp.encode())
+        payload = {
+            "otp": otp_sha256.hexdigest(),
+            "txnId": auth["txnId"]
+        }
 
-    response = requests.post(url, json=payload, verify=False)
+        response = requests.post(url, json=payload, verify=False)
 
-    if not _is_response_successful(response):
-        logger.error("Could not confirm OTP")
-        return False
+        if not _is_response_successful(response):
+            logger.error("Could not confirm OTP")
+            return False
 
-    data = response.json()
-    auth["token"] = data["token"]
-    return True
+        data = response.json()
+        auth["token"] = data["token"]
+        return True
+    except requests.exceptions.ConnectionError as e:
+        logger.error("Internet connection is not available")
 
 
-def get_calendar(district_id):
-    url = base_url + "/v2/appointment/sessions/calendarByDistrict"
-    headers = {
-        "authorization": f"Bearer {auth['token']}",
-        "accept": "application/json",
-        "accept-language": "en_US",
-        "accept-encoding": "gzip, deflate, br",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36 Edg/90.0.818.51"
-    }
+def centers_in_radius(center):
+    center_distance = geographical_distance(center)
+    if center_distance <= radius:
+        return True
 
-    params = {
-        "district_id": district_id,
-        "date": today
-    }
+    logger.debug(f"Center '{center['name']} is too far({center_distance}km), not considering it'")
+    return False
 
-    rsp = requests.get(url, headers=headers, params=params, verify=False)
-    if not _is_response_successful(rsp):
-        logger.error("failed to get calendar")
-        return None
 
-    return rsp.json()
+def get_centers(district_id):
+    try:
+        url = base_url + "/v2/appointment/sessions/calendarByDistrict"
+        headers = {
+            "authorization": f"Bearer {auth['token']}",
+            "accept": "application/json",
+            "accept-language": "en_US",
+            "accept-encoding": "gzip, deflate, br",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36 Edg/90.0.818.51"
+        }
+
+        params = {
+            "district_id": district_id,
+            "date": today
+        }
+
+        rsp = requests.get(url, headers=headers, params=params, verify=False)
+        if not _is_response_successful(rsp):
+            logger.error("failed to get centers")
+            return None
+
+        centers_json = rsp.json()
+        centers = centers_json["centers"]
+
+        # location param recevied are invalid from cowin, look at bug https://github.com/cowinapi/developer.cowin/issues/1
+        # filtered_centers = filter(centers_in_radius, centers)
+        filtered_centers = centers
+        sorted_centers = sorted(filtered_centers, key=geographical_distance)
+
+        logger.debug(sorted_centers)
+        return sorted_centers
+    except requests.exceptions.ConnectionError as e:
+        logger.error("Internet connection is not available")
 
 
 def get_states():
-    url = base_url + "/v2/admin/location/states"
-    headers = {
-        "authorization": f"Bearer {auth['token']}",
-        "accept": "application/json",
-        "accept-language": "en_US",
-        "accept-encoding": "gzip, deflate, br",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36 Edg/90.0.818.51"
-    }
+    try:
+        url = base_url + "/v2/admin/location/states"
+        headers = {
+            "authorization": f"Bearer {auth['token']}",
+            "accept": "application/json",
+            "accept-language": "en_US",
+            "accept-encoding": "gzip, deflate, br",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36 Edg/90.0.818.51"
+        }
 
-    rsp = requests.get(url, headers=headers, verify=False)
-    if not _is_response_successful(rsp):
-        logger.error("failed to get calendar")
-        return None
+        rsp = requests.get(url, headers=headers, verify=False)
+        if not _is_response_successful(rsp):
+            logger.error("failed to get calendar")
+            return None
 
-    states_json = rsp.json()
+        states_json = rsp.json()
 
-    return states_json['states']
+        return states_json['states']
+    except requests.exceptions.ConnectionError as e:
+        logger.error("Internet connection is not available")
 
 
 def print_states(states):
@@ -157,26 +233,29 @@ def print_states(states):
 
 
 def get_districts(state_id):
-    url = base_url + f"/v2/admin/location/districts/{state_id}"
-    headers = {
-        "authorization": f"Bearer {auth['token']}",
-        "accept": "application/json",
-        "accept-language": "en_US",
-        "accept-encoding": "gzip, deflate, br",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36 Edg/90.0.818.51"
-    }
-    params = {
-        "state_id": state_id
-    }
+    try:
+        url = base_url + f"/v2/admin/location/districts/{state_id}"
+        headers = {
+            "authorization": f"Bearer {auth['token']}",
+            "accept": "application/json",
+            "accept-language": "en_US",
+            "accept-encoding": "gzip, deflate, br",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36 Edg/90.0.818.51"
+        }
+        params = {
+            "state_id": state_id
+        }
 
-    rsp = requests.get(url, headers=headers, params=params, verify=False)
-    if not _is_response_successful(rsp):
-        logger.error("failed to get calendar")
-        return None
+        rsp = requests.get(url, headers=headers, params=params, verify=False)
+        if not _is_response_successful(rsp):
+            logger.error("failed to get calendar")
+            return None
 
-    districts_json = rsp.json()
+        districts_json = rsp.json()
 
-    return districts_json['districts']
+        return districts_json['districts']
+    except requests.exceptions.ConnectionError as e:
+        logger.error("Internet connection is not available")
 
 
 def print_districts(districts):
@@ -184,52 +263,112 @@ def print_districts(districts):
         print(f"\t{index} -> {districts[index]['district_name']}")
 
 
-def check_vaccine_availability(data, age, no_of_vaccine):
-    centers = data["centers"]
+def get_beneficiaries():
+    url = base_url + "/v2/appointment/beneficiaries"
+    headers = {
+        "authorization": f"Bearer {auth['token']}",
+        "accept": "application/json",
+        "accept-language": "en-US,en;q=0.9",
+        "accept-encoding": "gzip, deflate, br",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36",
+        "origin": "https://selfregistration.cowin.gov.in",
+        "referer": "https://selfregistration.cowin.gov.in/",
+        "sec-ch-ua": 'Not A;Brand";v="99", "Chromium";v="90", "Google Chrome";v="90"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "cross-site"
+    }
+
+    print(url)
+    print(headers)
+
+    rsp = requests.get(url, headers=headers, verify=False)
+    print(rsp)
+
+    if not _is_response_successful(rsp):
+        logger.error("failed to get beneficiaries")
+        return None
+
+    beneficiaries_json = rsp.json()
+
+    return beneficiaries_json['beneficiaries']
+
+
+def get_available_capacity(center):
+    capacity = 0
+
+    for a_session in center['sessions']:
+        capacity += a_session['available_capacity']
+
+    return capacity
+
+
+def check_vaccine_availability(centers, age, no_of_vaccine):
     vaccine_available = False
+    vc_centers = []
 
-    for a_center in centers:
-        center_name = a_center['name']
-        logger.debug(f"Processing center '{center_name}'")
+    for center_index in range(len(centers)):
+        center_name = centers[center_index]['name']
+        logger.debug(f"Processing center '{center_name}', distance '{geographical_distance(centers[center_index])}'")
 
-        for a_session in a_center['sessions']:
+        for a_session in centers[center_index]['sessions']:
             min_age = a_session['min_age_limit']
             capacity = a_session['available_capacity']
             date = a_session['date']
 
+            logger.debug(f"Center '{center_name}', Date '{date}', Min age '{min_age}', Capacity '{capacity}'")
+
             if min_age <= age and capacity >= no_of_vaccine:
                 logger.debug(f"'{capacity}' vaccine(s) are available on center '{center_name}' on date '{date}'")
                 vaccine_available = True
+                vc_centers.append(center_index)
+                break
 
-    return vaccine_available
+    return vaccine_available, vc_centers
 
 
-def _build_email_body():
+def _build_email_body(centers, vc_center_indexs):
+    count = 1
     msg = f"""Subject: Vaccines are available in your area.
 
     Hi, 
-        Register now, vaccines are available in your area.
+    
+    Register now, vaccines are available in your area at the following centers:.
     """
+    for i in vc_center_indexs:
+        center = centers[i]
+        msg += f"\t{count} '{center['name']}' distance '{geographical_distance(center)}' Capacity " \
+               f"'{get_available_capacity(center)}'\n "
+        count += 1
+
+        if count >= 10:
+            break;
 
     return msg
 
 
 if __name__ == '__main__':
-    age = input("Enter your age: ")
-    min_count = input("Minimum number of doses you are looking for: ")
-    mobile_no = input("Enter your mobile number: ")
+    age = int(input("Enter your age: "))
+    min_count = int(input("Minimum number of doses you are looking for: "))
+    radius = int(input("Radius in Km: "))
+    user_lat_s, user_long_s = input("Your location latitude and longitude(28.150031, 75.466037): ").split(",")
+    user_lat = float(user_lat_s)
+    user_long = float(user_long_s)
+
+    mobile_no = input("Enter your registered mobile number: ")
 
     if not generate_otp(mobile_no):
         exit(1)
 
-    logger.info("OTP sent successfully")
+    logger.debug("OTP sent successfully")
 
     otp = input("Enter the OTP: ")
 
     if not confirm_otp(otp):
         exit(1)
 
-    logger.info("OTP confirmed successfully")
+    logger.debug("OTP confirmed successfully")
 
     states = get_states()
     if states is None:
@@ -238,7 +377,7 @@ if __name__ == '__main__':
     clear_screen()
     print("Chose your states from following:")
     print_states(states)
-    state_index = input("Your state: ")
+    state_index = input("Your state index: ")
     user_state = states[int(state_index)]
 
     if not user_state:
@@ -253,7 +392,7 @@ if __name__ == '__main__':
     clear_screen()
     print("Chose your district from following:")
     print_districts(districts)
-    district_index = input("Your district: ")
+    district_index = input("Your district index: ")
     user_district = districts[int(district_index)]
 
     district_id = user_district["district_id"]
@@ -269,20 +408,25 @@ if __name__ == '__main__':
     logger.info("Users will be notified when the vaccines are available.")
 
     while True:
-        centers_json = get_calendar(district_id)
+        centers = get_centers(district_id)
+        success, vc_centers_indexes = check_vaccine_availability(centers, int(age), int(min_count))
 
-        if centers_json is None:
-            exit(1)
+        if success:
+            logger.info(f"Vaccines are available. Notifying user(s)")
 
-        if check_vaccine_availability(centers_json, int(age), int(min_count)):
             for target in notification_targets:
-                _send_email(target, _build_email_body())
+                try:
+                    _send_email(target, _build_email_body(centers, vc_centers_indexes))
+                except Exception as e:
+                    logger.error("Failed to send email to the user")
+                    logger.exception(e)
 
-            logger.info(f"Vaccines are available. User(s) notified")
+            audio_alert()
+
         else:
             logger.warning(
                 f"'{min_count}' vaccine dose(s) are not available in '{user_district['district_name']}' for '{age}' "
                 f"years old "
             )
 
-        time.sleep(5 * 60)
+        time.sleep(30)
