@@ -20,15 +20,13 @@ yesterday = (datetime.now() - timedelta(1)).strftime('%d-%m-%Y')
 tomorrow = (datetime.now() + timedelta(1)).strftime('%d-%m-%Y')
 
 port = 465
-smtp_server = "smtp.gmail.com"
+smtp_server = ""
 
-# make sure less secure access is ON for sender account
+# make sure less secure access is ON for sender account^M
 # https://myaccount.google.com/lesssecureapps
-sender_email = ""    #set your email address here
-
-
-password = "" #set  our password here
-notification_targets = []  # add the users email address who should be notified when the vaccine is available
+sender_email = ""  # TODO: set your email address here
+password = ""  # TODO: set your password here
+notification_targets = []  # TODO: add the users email address who should be notified when the vaccine is available
 
 user_lat = 0
 user_long = 0
@@ -55,12 +53,36 @@ def audio_alert():
         myobj = gTTS(text=mytext, lang=language, slow=False)
         myobj.save(filename)
 
+    print("press ctrl+c to stop the notification")
+
     while True:
         try:
-            print("press ctrl+c to stop the notification")
             playsound(filename)
             time.sleep(0.3)
         except KeyboardInterrupt as e:
+            print("audio notification stopped")
+            return
+
+
+def restart_audio_alert():
+    from os import path
+    filename = "restart_voice_alert.mp3"
+
+    if not path.exists(filename):
+        from gtts import gTTS
+        mytext = 'Alert! restart the script'
+        language = 'en'
+        myobj = gTTS(text=mytext, lang=language, slow=False)
+        myobj.save(filename)
+
+    print("press ctrl+c to stop the notification")
+
+    while True:
+        try:
+            playsound(filename)
+            time.sleep(0.3)
+        except KeyboardInterrupt as e:
+            print("audio notification stopped")
             return
 
 
@@ -328,18 +350,21 @@ def check_vaccine_availability(centers, age, no_of_vaccine):
     return vaccine_available, vc_centers
 
 
-def _build_email_body(centers, vc_center_indexs):
+def _build_email_body(centers, vc_center_indexs, email):
     count = 1
-    msg = f"""Subject: Vaccines are available in your area.
+    msg = ""
+    if email:
+        msg += f"""Subject: Vaccines are available in your area.
 
-    Hi, 
+        Hi, 
     
-    Register now, vaccines are available in your area at the following centers:.
-    """
+        """
+    msg += "Register now, vaccines are available in your area at the following centers:\n"
+
     for i in vc_center_indexs:
         center = centers[i]
         msg += f"\t{count} '{center['name']}' distance '{geographical_distance(center)}' Capacity " \
-               f"'{get_available_capacity(center)}'\n "
+               f"'{get_available_capacity(center)}', Pincode '{center['pincode']}'\n "
         count += 1
 
         if count >= 10:
@@ -406,17 +431,34 @@ if __name__ == '__main__':
     clear_screen()
 
     logger.info("Users will be notified when the vaccines are available.")
+    error_count = 0
 
     while True:
         centers = get_centers(district_id)
+
+        if centers is None:
+            error_count += 1
+
+            if error_count >= 5:
+                restart_audio_alert()
+                logger.error("Script is facing issues, try restarting it")
+                exit(1)
+
+            time.sleep(15)
+            continue
+
+        error_count = 0
+
         success, vc_centers_indexes = check_vaccine_availability(centers, int(age), int(min_count))
 
         if success:
-            logger.info(f"Vaccines are available. Notifying user(s)")
+            logger.info(f"Vaccines are available at the following centers.")
+            logger.info(_build_email_body(centers, vc_centers_indexes, False))
+            logger.debug("notifying user(s)")
 
             for target in notification_targets:
                 try:
-                    _send_email(target, _build_email_body(centers, vc_centers_indexes))
+                    _send_email(target, _build_email_body(centers, vc_centers_indexes, True))
                 except Exception as e:
                     logger.error("Failed to send email to the user")
                     logger.exception(e)
