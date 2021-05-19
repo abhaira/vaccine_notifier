@@ -145,17 +145,23 @@ def generate_otp(number):
     try:
         url = base_url + "/v2/auth/public/generateOTP"
         payload = {"mobile": number}
+        headers = {
+            "accept": "application/json",
+            "accept-language": "en_US",
+            "accept-encoding": "gzip, deflate, br",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36 Edg/90.0.818.51"
+        }
 
-        response = requests.post(url, json=payload, verify=False)
+        response = requests.post(url, json=payload, headers=headers, verify=False)
 
         if not _is_response_successful(response):
-            logger.error("Could not generate OTP")
+            logger.error(f"Could not generate OTP - {response}")
             return False
 
         data = response.json()
         auth["txnId"] = data["txnId"]
         return True
-    except requests.exceptions.ConnectionError as e:
+    except requests.exceptions.ConnectionError:
         logger.error("Internet connection is not available")
 
 
@@ -169,16 +175,23 @@ def confirm_otp(otp):
             "txnId": auth["txnId"]
         }
 
-        response = requests.post(url, json=payload, verify=False)
+        headers = {
+            "accept": "application/json",
+            "accept-language": "en_US",
+            "accept-encoding": "gzip, deflate, br",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36 Edg/90.0.818.51"
+        }
+
+        response = requests.post(url, json=payload, headers=headers, verify=False)
 
         if not _is_response_successful(response):
-            logger.error("Could not confirm OTP")
+            logger.error(f"Could not confirm OTP - {response}")
             return False
 
         data = response.json()
         auth["token"] = data["token"]
         return True
-    except requests.exceptions.ConnectionError as e:
+    except requests.exceptions.ConnectionError:
         logger.error("Internet connection is not available")
 
 
